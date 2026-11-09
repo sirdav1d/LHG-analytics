@@ -35,13 +35,10 @@ test.describe('Task 04 - Logo image optimization', () => {
 		]);
 	});
 
-	test('login and dashboard do not emit logo-analytics image warnings', async ({
+	test('dashboard does not emit logo-analytics image warnings', async ({
 		page,
 	}) => {
 		const warnings = trackLogoWarnings(page);
-
-		await page.goto('/login');
-		await page.waitForTimeout(1000);
 
 		await page.goto('/general?menu=general&set=ultimos_7_dias');
 		await page.waitForTimeout(1000);

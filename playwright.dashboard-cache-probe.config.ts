@@ -15,7 +15,7 @@ export default defineConfig({
 	},
 	webServer: {
 		command: `npm run dev -- -p ${PORT}`,
-		url: baseURL,
+		url: `${baseURL}/favcon.png`,
 		reuseExistingServer: false,
 		timeout: 120 * 1000,
 		env: {

@@ -1,5 +1,6 @@
 import { expect, test } from '@playwright/test';
 import { NextRequest, NextResponse } from 'next/server';
+import { withAuthEnv } from './helpers/auth-env';
 
 type SessionUser = {
 	role?: string;
@@ -19,8 +20,20 @@ function getContracts() {
 	const defaultRoute = require('../src/lib/session/default-route') as typeof import('../src/lib/session/default-route');
 	// eslint-disable-next-line @typescript-eslint/no-require-imports
 	const authUrl = require('../src/lib/auth-url') as typeof import('../src/lib/auth-url');
+	// eslint-disable-next-line @typescript-eslint/no-require-imports
+	const loginRedirect = require('../src/lib/session/login-redirect') as typeof import('../src/lib/session/login-redirect');
+	// eslint-disable-next-line @typescript-eslint/no-require-imports
+	const hubError = require('../src/lib/session/hub-error') as typeof import('../src/lib/session/hub-error');
 
-	return { ...cookies, ...requestPath, ...returnTo, ...defaultRoute, ...authUrl };
+	return {
+		...hubError,
+		...cookies,
+		...requestPath,
+		...returnTo,
+		...defaultRoute,
+		...authUrl,
+		...loginRedirect,
+	};
 }
 
 test.describe('session routing contracts', () => {
@@ -213,5 +226,274 @@ test.describe('session routing contracts', () => {
 				).toBe(expected);
 			}
 		}
+	});
+
+	test('builds HUB URLs from the configured auth service', async () => {
+		const { HUB_PORTAL_URL, resolveAuthApiUrl, resolveHubLoginUrl } = getContracts();
+		const hubLogin = 'https://analytics-dev.lhgmoteis.com.br/auth/api/hub/login';
+		const hubLogout = 'https://analytics-dev.lhgmoteis.com.br/auth/api/hub/logout';
+
+		expect(HUB_PORTAL_URL).toBe('https://hub.lhgmoteis.com.br/');
+
+		await withAuthEnv(
+			{
+				BACKEND_AUTH_ENDPOINT: 'https://analytics-dev.lhgmoteis.com.br/auth/api',
+				NEXT_PUBLIC_AUTH_URL: undefined,
+			},
+			() => {
+				expect(resolveHubLoginUrl('/general?menu=general&set=hoje')).toBe(
+					`${hubLogin}?returnTo=%2Fgeneral%3Fmenu%3Dgeneral%26set%3Dhoje`,
+				);
+				for (const unsafe of [
+					'https://site-externo.com',
+					'//site-externo.com',
+					'/general\\evil',
+					'/login',
+					'/api/session/refresh',
+					null,
+				]) {
+					expect(resolveHubLoginUrl(unsafe)).toBe(hubLogin);
+				}
+				expect(resolveAuthApiUrl('hub/logout')).toBe(hubLogout);
+			},
+		);
+
+		await withAuthEnv(
+			{
+				BACKEND_AUTH_ENDPOINT: '',
+				NEXT_PUBLIC_AUTH_URL: 'https://analytics-dev.lhgmoteis.com.br/auth',
+			},
+			() => expect(resolveAuthApiUrl('hub/logout')).toBe(hubLogout),
+		);
+
+		await withAuthEnv(
+			{ BACKEND_AUTH_ENDPOINT: undefined, NEXT_PUBLIC_AUTH_URL: undefined },
+			() => {
+				expect(resolveHubLoginUrl('/general')).toBeNull();
+				expect(resolveAuthApiUrl('hub/logout')).toBeNull();
+			},
+		);
+	});
+
+	test('decides every /login destination', async () => {
+		const { resolveLoginRedirect } = getContracts();
+		const portal = 'https://hub.lhgmoteis.com.br/';
+		const hubLogin = 'https://analytics-dev.lhgmoteis.com.br/auth/api/hub/login';
+		const admin = {
+			status: 'authenticated',
+			user: { email: 'admin@lhg.test', role: 'ADMIN', unit: 'LHG' },
+		} as const;
+		const noProfile = {
+			status: 'authenticated',
+			user: { email: 'sem-perfil@lhg.test' },
+		} as const;
+		const missing = {
+			status: 'unauthenticated',
+			canRefresh: false,
+			reason: 'missing',
+		} as const;
+		const base = { hubError: null, returnTo: null, set: null };
+
+		await withAuthEnv(
+			{
+				BACKEND_AUTH_ENDPOINT: 'https://analytics-dev.lhgmoteis.com.br/auth/api',
+				NEXT_PUBLIC_AUTH_URL: undefined,
+			},
+			() => {
+				// 1: any hub_error, even empty, wins over a valid session and goes to
+				// the error screen by CODE (unknown → falha); never back to the HUB login
+				for (const [hubError, code] of [
+					['access_denied', 'access_denied'],
+					['inactive', 'inactive'],
+					['indisponivel', 'indisponivel'],
+					['falha', 'falha'],
+					['', 'falha'],
+					['<script>alert(1)</script>', 'falha'],
+					['toString', 'falha'],
+				]) {
+					expect(resolveLoginRedirect({ ...base, hubError, session: admin })).toBe(
+						`/login/erro?codigo=${code}`,
+					);
+					expect(resolveLoginRedirect({ ...base, hubError, session: missing })).toBe(
+						`/login/erro?codigo=${code}`,
+					);
+				}
+				expect(
+					resolveLoginRedirect({
+						...base,
+						hubError: 'falha',
+						returnTo: '/general?menu=general&set=hoje',
+						session: missing,
+					}),
+				).toBe('/login/erro?codigo=falha&returnTo=%2Fgeneral%3Fmenu%3Dgeneral%26set%3Dhoje');
+				// 2: /me unavailable shows "indisponível" (no logout); forbidden logs out
+				expect(
+					resolveLoginRedirect({ ...base, session: { status: 'unavailable' } }),
+				).toBe('/login/erro?codigo=indisponivel');
+				expect(
+					resolveLoginRedirect({
+						...base,
+						session: { status: 'unauthenticated', canRefresh: false, reason: 'forbidden' },
+					}),
+				).toBe('/api/session/logout');
+				// 3: authenticated with a default route, keeping set
+				expect(
+					resolveLoginRedirect({ ...base, set: 'ultimos_30_dias', session: admin }),
+				).toBe('/general?menu=general&set=ultimo_mes_fechado');
+				// 3b: authenticated with a safe returnTo goes there; unsafe → default
+				expect(
+					resolveLoginRedirect({
+						...base,
+						returnTo: '/reservations/lushipiranga?menu=reservations&set=hoje',
+						session: admin,
+					}),
+				).toBe('/reservations/lushipiranga?menu=reservations&set=hoje');
+				expect(
+					resolveLoginRedirect({ ...base, returnTo: '//evil.test', session: admin }),
+				).toBe('/general?menu=general&set=ultimos_7_dias');
+				// 4: authenticated without profile or unit
+				expect(resolveLoginRedirect({ ...base, session: noProfile })).toBe(portal);
+				// 5: no session or refused refresh goes to the HUB login
+				expect(
+					resolveLoginRedirect({
+						...base,
+						returnTo: '/general?menu=general&set=hoje',
+						session: missing,
+					}),
+				).toBe(`${hubLogin}?returnTo=%2Fgeneral%3Fmenu%3Dgeneral%26set%3Dhoje`);
+				expect(
+					resolveLoginRedirect({
+						...base,
+						session: { status: 'unauthenticated', canRefresh: true, reason: 'unauthorized' },
+					}),
+				).toBe(hubLogin);
+			},
+		);
+
+		// 6: no auth service configured
+		await withAuthEnv(
+			{ BACKEND_AUTH_ENDPOINT: undefined, NEXT_PUBLIC_AUTH_URL: undefined },
+			() => {
+				expect(resolveLoginRedirect({ ...base, session: missing })).toBe(portal);
+			},
+		);
+	});
+
+	test('hub error screen: fixed messages per code, retry only for transient errors', () => {
+		const { normalizeHubErrorCode, getHubErrorContent, buildHubErrorPath } =
+			getContracts();
+
+		expect(normalizeHubErrorCode('access_denied')).toBe('access_denied');
+		expect(normalizeHubErrorCode('__proto__')).toBe('falha');
+		expect(normalizeHubErrorCode(null)).toBe('falha');
+		expect(getHubErrorContent('access_denied').canRetry).toBe(false);
+		expect(getHubErrorContent('inactive').canRetry).toBe(false);
+		expect(getHubErrorContent('indisponivel').canRetry).toBe(true);
+		expect(getHubErrorContent('falha').canRetry).toBe(true);
+		expect(getHubErrorContent('access_denied').message).toContain(
+			'não tem acesso ao LHG Analytics',
+		);
+		expect(buildHubErrorPath('indisponivel', '/settings')).toBe(
+			'/login/erro?codigo=indisponivel&returnTo=%2Fsettings',
+		);
+		// returnTo inseguro não entra na URL da tela de erro
+		expect(buildHubErrorPath('falha', 'https://evil.test')).toBe(
+			'/login/erro?codigo=falha',
+		);
+	});
+
+	test('only dashboard roots require a session (unknown paths reach the 404)', () => {
+		const { isSessionPath } = getContracts();
+
+		for (const path of [
+			'/general',
+			'/general/liv',
+			'/operational/tout',
+			'/reservations/lushlapa',
+			'/restaurant/altana',
+			'/settings',
+		]) {
+			expect(isSessionPath(path)).toBe(true);
+		}
+		for (const path of ['/relatorios', '/generalx', '/login/erro', '/', '/x/general']) {
+			expect(isSessionPath(path)).toBe(false);
+		}
+	});
+
+	test('HUB browser navigations use the PUBLIC auth URL (same host as Sair)', async () => {
+		const { resolveAuthApiUrl, resolveHubLoginUrl } = getContracts();
+
+		await withAuthEnv(
+			{
+				BACKEND_AUTH_ENDPOINT: 'http://interno.svc:3005/auth/api',
+				NEXT_PUBLIC_AUTH_URL: 'https://analytics-dev.lhgmoteis.com.br/auth',
+			},
+			() => {
+				// navegações do navegador: o endereço público
+				expect(resolveHubLoginUrl(null)).toBe(
+					'https://analytics-dev.lhgmoteis.com.br/auth/api/hub/login',
+				);
+				expect(resolveAuthApiUrl('hub/logout')).toBe(
+					'https://analytics-dev.lhgmoteis.com.br/auth/api/hub/logout',
+				);
+				// chamadas do servidor: podem usar o endereço interno
+				expect(resolveAuthApiUrl('me')).toBe('http://interno.svc:3005/auth/api/me');
+			},
+		);
+	});
+
+	test('forces HUB logout from the session logout route', async () => {
+		// eslint-disable-next-line @typescript-eslint/no-require-imports
+		const { GET } = require('../src/app/api/session/logout/route') as typeof import('../src/app/api/session/logout/route');
+		const { getSetCookies } = getContracts();
+		const url = 'https://analytics-front-dev.lhgmoteis.com.br/api/session/logout';
+		const trusted = () =>
+			new NextRequest(url, { headers: { 'sec-fetch-site': 'same-origin' } });
+		const expectExpiredCookies = (response: Response) => {
+			const cookies = getSetCookies(response.headers);
+			expect(cookies.some((cookie) => /^access_token=;.*Max-Age=0/.test(cookie))).toBe(
+				true,
+			);
+			expect(cookies.some((cookie) => /^refresh_token=;.*Max-Age=0/.test(cookie))).toBe(
+				true,
+			);
+		};
+
+		await withAuthEnv(
+			{
+				BACKEND_AUTH_ENDPOINT: 'https://analytics-dev.lhgmoteis.com.br/auth/api',
+				NEXT_PUBLIC_AUTH_URL: undefined,
+			},
+			async () => {
+				const response = GET(trusted());
+				expect(response.status).toBe(200);
+				expect(response.headers.get('content-type')).toContain('text/html');
+				expect(response.headers.get('cache-control')).toContain('no-store');
+				const html = await response.text();
+				expect(html).toContain(
+					'<form method="post" action="https://analytics-dev.lhgmoteis.com.br/auth/api/hub/logout">',
+				);
+				expect(html).toContain(
+					'<noscript><button type="submit">Sair</button></noscript>',
+				);
+				expect(html).toContain('<script>document.forms[0].submit()</script>');
+				expectExpiredCookies(response);
+
+				const crossSite = GET(
+					new NextRequest(url, { headers: { 'sec-fetch-site': 'cross-site' } }),
+				);
+				expect(crossSite.status).toBe(403);
+			},
+		);
+
+		await withAuthEnv(
+			{ BACKEND_AUTH_ENDPOINT: undefined, NEXT_PUBLIC_AUTH_URL: undefined },
+			() => {
+				const response = GET(trusted());
+				expect(response.status).toBe(303);
+				expect(response.headers.get('location')).toBe('https://hub.lhgmoteis.com.br/');
+				expectExpiredCookies(response);
+			},
+		);
 	});
 });

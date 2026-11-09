@@ -1,4 +1,4 @@
-import { expect, test, type APIResponse } from '@playwright/test';
+import { expect, test, type APIResponse, type Page } from '@playwright/test';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 
 const AUTH_PORT = Number(process.env.PW_AUTH_PORT);
@@ -19,7 +19,6 @@ const KPI_UNAUTHORIZED_URL =
 	'/restaurant?menu=restaurant&set=custom&startDate=2091-01-01&endDate=2091-01-07';
 const SAFE_RETURN_TO = '/general?menu=general&set=ultimos_7_dias';
 const FAILURE_REASON = 'session_refresh_failed';
-const SESSION_FAILURE_REASON = 'session_validation_failed';
 const SENSITIVE_UPSTREAM_VALUE = 'upstream-secret-token-value';
 const TRUSTED_NAVIGATION_HEADERS = {
 	'Sec-Fetch-Site': 'same-origin',
@@ -247,6 +246,15 @@ function expectPrivateBodylessRedirect(response: APIResponse) {
 	expect(cacheControl).toMatch(/(?:^|,)\s*max-age=0(?:,|$)/i);
 }
 
+async function interceptHubLogout(page: Page): Promise<string[]> {
+	const methods: string[] = [];
+	await page.route('**/hub/logout', async (route) => {
+		methods.push(route.request().method());
+		await route.fulfill({ contentType: 'text/html', body: 'hub logout' });
+	});
+	return methods;
+}
+
 async function expectRejectedBeforeTransaction(response: APIResponse) {
 	expect(response.status()).toBe(403);
 	const cacheControl = response.headers()['cache-control'] ?? '';
@@ -328,7 +336,11 @@ test.describe('transparent refresh route handler', () => {
 		authRequests = [];
 	});
 
-	test('logs out and redirects to login when /me cannot validate the session', async ({
+	// /me indisponível (5xx/timeout) NÃO é sessão inválida: mostra o erro com
+	// "Tentar de novo" para a mesma página e NÃO desloga (o logout derrubaria
+	// também a sessão do HUB LHG). Sessão inválida de verdade (401/403) segue
+	// pelo refresh ou pelo logout, como nos outros testes.
+	test('shows the unavailable screen (no HUB logout) when /me cannot validate the session', async ({
 		page,
 	}, testInfo) => {
 		scenario = 'session-unavailable';
@@ -340,21 +352,29 @@ test.describe('transparent refresh route handler', () => {
 			{ name: 'access_token', value: 'unavailable-token', url: cookieUrl },
 			{ name: 'refresh_token', value: 'unavailable-refresh', url: cookieUrl },
 		]);
+		const hubLogoutMethods = await interceptHubLogout(page);
 
 		await page.goto(ORIGINAL_DASHBOARD);
-		await expect(page).toHaveURL(
-			new RegExp(`/login\\?reason=${SESSION_FAILURE_REASON}$`),
-		);
+		await expect(page).toHaveURL(/\/login\/erro\?codigo=indisponivel&returnTo=/);
 		await expect(
-			page.getByText('Sessão temporariamente indisponível'),
-		).toHaveCount(0);
+			page.getByText('Serviço temporariamente indisponível'),
+		).toBeVisible();
+		await expect(
+			page.getByRole('link', { name: 'Tentar de novo' }),
+		).toHaveAttribute('href', ORIGINAL_DASHBOARD);
+		await expect(page.getByText(SENSITIVE_UPSTREAM_VALUE)).toHaveCount(0);
+		expect(hubLogoutMethods).toEqual([]);
 
 		const cookies = await page.context().cookies();
-		expect(cookies.find((cookie) => cookie.name === 'access_token')).toBeUndefined();
-		expect(cookies.find((cookie) => cookie.name === 'refresh_token')).toBeUndefined();
+		expect(
+			cookies.find((cookie) => cookie.name === 'access_token')?.value,
+		).toBe('unavailable-token');
+		expect(
+			cookies.find((cookie) => cookie.name === 'refresh_token')?.value,
+		).toBe('unavailable-refresh');
 	});
 
-	test('logs out when the authenticated dashboard receives a KPI 401', async ({
+	test('forces HUB logout when the authenticated dashboard receives a KPI 401', async ({
 		page,
 	}, testInfo) => {
 		scenario = 'kpi-unauthorized';
@@ -366,11 +386,11 @@ test.describe('transparent refresh route handler', () => {
 			{ name: 'access_token', value: 'kpi-token', url: cookieUrl },
 			{ name: 'refresh_token', value: 'kpi-refresh', url: cookieUrl },
 		]);
+		const hubLogoutMethods = await interceptHubLogout(page);
 
 		await page.goto(KPI_UNAUTHORIZED_URL);
-		await expect(page).toHaveURL(
-			new RegExp(`/login\\?reason=${SESSION_FAILURE_REASON}$`),
-		);
+		await expect(page).toHaveURL(/\/hub\/logout$/);
+		expect(hubLogoutMethods).toEqual(['POST']);
 
 		const cookies = await page.context().cookies();
 		expect(cookies.find((cookie) => cookie.name === 'access_token')).toBeUndefined();

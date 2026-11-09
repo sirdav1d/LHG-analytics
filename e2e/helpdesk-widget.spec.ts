@@ -25,17 +25,6 @@ async function authenticate(page: Page, baseURL: string) {
 	]);
 }
 
-test('does not load the widget on login', async ({ page }) => {
-	let requests = 0;
-	await page.route(scriptUrl, async route => {
-		requests++;
-		await route.fulfill({ contentType: 'application/javascript', body: mockScript });
-	});
-	await page.goto('/login');
-	await expect(page.getByRole('button', { name: /entrar/i })).toBeVisible();
-	expect(requests).toBe(0);
-});
-
 test('keeps one widget during private navigation and removes it on logout', async ({ page, baseURL }) => {
 	await authenticate(page, baseURL!);
 	let scriptRequests = 0;
@@ -59,11 +48,18 @@ test('keeps one widget during private navigation and removes it on logout', asyn
 	await expect(page.locator('#helpdesk-bubble')).toHaveCount(1);
 	expect(await page.evaluate(() => sessionStorage.getItem('helpdesk:init'))).toBe(initialCalls);
 	expect(scriptRequests).toBe(1);
+	const hubLogoutMethods: string[] = [];
+	await page.route('**/hub/logout', async route => {
+		hubLogoutMethods.push(route.request().method());
+		await route.fulfill({ contentType: 'text/html', body: 'hub logout' });
+	});
 	// Existing chart/filter errors can open the dev overlay over the button.
-	// Dispatch the real button handler to isolate the widget logout lifecycle.
+	// A dispatched click still submits the logout form.
 	await page.getByRole('button', { name: 'Sair', exact: true }).dispatchEvent('click');
-	await expect(page).toHaveURL(/\/login$/);
+	await expect(page).toHaveURL(/\/api\/hub\/logout$/);
+	expect(hubLogoutMethods).toEqual(['POST']);
 	await expect(page.locator('#helpdesk-bubble')).toHaveCount(0);
+	// The full-page logout never runs React cleanup, so Sair must destroy first.
 	expect(Number(await page.evaluate(() => sessionStorage.getItem('helpdesk:destroy')))).toBe(Number(initialCalls));
 });
 

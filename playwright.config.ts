@@ -17,7 +17,7 @@ export default defineConfig({
 	},
 	webServer: {
 		command: serverCommand,
-		url: baseURL,
+		url: `${baseURL}/favcon.png`,
 		reuseExistingServer: false,
 		timeout: 120 * 1000,
 		env: {

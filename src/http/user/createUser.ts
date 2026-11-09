@@ -19,7 +19,10 @@ export async function createUser({
 		await auth_api.post('users', {
 			headers: authHeaders,
 			next: { tags: ['users'] },
-			json: { email, name, cpf, password, role, unit },
+			// systems: a flag de acesso exigida pelo HUB LHG para entrar no
+			// Analytics. Sem ela o backend ainda aceita (com Deprecation), mas
+			// vai passar a recusar (400 SYSTEMS_REQUIRED).
+			json: { email, name, cpf, password, role, unit, systems: ['analytics'] },
 		});
 	} catch (error) {
 		throw new UserUpstreamError(error);

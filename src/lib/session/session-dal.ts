@@ -2,6 +2,7 @@ import 'server-only';
 
 import { buildCookieHeader } from '@/lib/auth-cookie';
 import { resolveAuthApiBaseUrl } from '@/lib/auth-url';
+import { buildHubErrorPath } from '@/lib/session/hub-error';
 import {
 	DASHBOARD_REQUEST_PATH_HEADER,
 	buildInternalRequestPath,
@@ -40,7 +41,8 @@ export const readSession = cache(async (): Promise<SessionReadResult> => {
 	}
 
 	const abortController = new AbortController();
-	const timeout = setTimeout(() => abortController.abort(), 5_000);
+	// 15 s: cobre a partida a frio do backend (Render) sem derrubar a sessão.
+	const timeout = setTimeout(() => abortController.abort(), 15_000);
 
 	try {
 		const response = await fetch(`${authApiBaseUrl}/me`, {
@@ -103,11 +105,13 @@ export async function requireDashboardSession(): Promise<SessionUser> {
 		return session.user;
 	}
 
-	if (session.status === 'unavailable') {
-		redirect('/api/session/logout');
-	}
-
 	const requestPath = await getRequestPath();
+
+	// Backend indisponível NÃO é sessão inválida: mostra o erro com "Tentar de
+	// novo" (volta à mesma página), em vez de deslogar do Analytics e do HUB.
+	if (session.status === 'unavailable') {
+		redirect(buildHubErrorPath('indisponivel', requestPath));
+	}
 	if (session.canRefresh) {
 		redirect(
 			`/api/session/refresh?returnTo=${encodeURIComponent(requestPath)}`,

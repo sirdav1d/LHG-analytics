@@ -28,48 +28,6 @@ async function readBody(resp: Response): Promise<JsonValue | string | null> {
 	return text || null;
 }
 
-export async function loginWithCookies(input: {
-	email: string;
-	password: string;
-}): Promise<AuthApiResult<JsonValue | string>> {
-	const resp = await fetch(`${baseUrl}/api/login`, {
-		method: 'POST',
-		headers: {
-			'content-type': 'application/json',
-		},
-		credentials: 'include',
-		body: JSON.stringify(input),
-	});
-
-	const payload = await readBody(resp);
-
-	return {
-		ok: resp.ok,
-		status: resp.status,
-		data: resp.ok ? payload : null,
-		error: resp.ok ? null : payload,
-	};
-}
-
-export async function logoutWithCookies(): Promise<
-	AuthApiResult<JsonValue | string>
-> {
-	const resp = await fetch('/api/logout', {
-		method: 'POST',
-		credentials: 'include',
-		cache: 'no-store',
-	});
-
-	const payload = await readBody(resp);
-
-	return {
-		ok: resp.ok,
-		status: resp.status,
-		data: resp.ok ? payload : null,
-		error: resp.ok ? null : payload,
-	};
-}
-
 export async function refreshWithCookies(): Promise<
 	AuthApiResult<JsonValue | string>
 > {

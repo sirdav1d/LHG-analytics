@@ -24,7 +24,7 @@ export default defineConfig({
 	},
 	webServer: {
 		command: serverCommand,
-		url: baseURL,
+		url: `${baseURL}/favcon.png`,
 		reuseExistingServer: false,
 		gracefulShutdown: { signal: 'SIGTERM', timeout: 5_000 },
 		timeout: 120 * 1000,
