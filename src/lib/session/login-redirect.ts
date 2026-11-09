@@ -1,5 +1,7 @@
 import { HUB_PORTAL_URL, resolveHubLoginUrl } from '@/lib/auth-url';
 import { getDefaultSessionHref } from '@/lib/session/default-route';
+import { buildHubErrorPath, normalizeHubErrorCode } from '@/lib/session/hub-error';
+import { sanitizeSessionReturnTo } from '@/lib/session/return-to';
 import type { SessionReadResult } from '@/lib/session/session-dal';
 
 export type LoginRedirectInput = {
@@ -9,9 +11,11 @@ export type LoginRedirectInput = {
 	session: SessionReadResult;
 };
 
-// /login has no screen: every request is sent to the HUB, the HUB portal or
-// the forced logout. Error outcomes never send back to the HUB login, because
-// its single sign-on session would return the person immediately (a loop).
+// /login has no screen: every request is sent to the HUB, the HUB portal, the
+// error screen (/login/erro) or the forced logout. Error outcomes never send
+// back to the HUB login automatically, because its single sign-on session
+// would return the person immediately (a loop): the error screen shows the
+// message and only offers buttons.
 export function resolveLoginRedirect({
 	hubError,
 	returnTo,
@@ -19,17 +23,25 @@ export function resolveLoginRedirect({
 	session,
 }: LoginRedirectInput): string {
 	if (hubError !== null) {
-		return HUB_PORTAL_URL;
+		// Mensagem pelo código (nunca o valor bruto), sem redirecionar sozinho.
+		return buildHubErrorPath(normalizeHubErrorCode(hubError), returnTo);
 	}
 
-	if (
-		session.status === 'unavailable' ||
-		(session.status === 'unauthenticated' && session.reason === 'forbidden')
-	) {
+	// Backend fora do ar ou lento: não desloga (seria sair do HUB também).
+	if (session.status === 'unavailable') {
+		return buildHubErrorPath('indisponivel', returnTo);
+	}
+
+	if (session.status === 'unauthenticated' && session.reason === 'forbidden') {
 		return '/api/session/logout';
 	}
 
 	if (session.status === 'authenticated') {
+		// Já logado: respeita o destino pedido (só caminhos internos seguros).
+		const safeReturnTo = sanitizeSessionReturnTo(returnTo);
+		if (safeReturnTo !== '/') {
+			return safeReturnTo;
+		}
 		const defaultHref = getDefaultSessionHref(session.user, set);
 		return defaultHref === '/login' ? HUB_PORTAL_URL : defaultHref;
 	}

@@ -2,10 +2,12 @@
 
 import { resolveHubLoginUrl } from '@/lib/auth-url';
 import { normalizeRangeTag } from '@/lib/date-range';
+import { HUB_ERROR_PATH } from '@/lib/session/hub-error';
 import {
 	buildInternalRequestPath,
 	DASHBOARD_REQUEST_PATH_HEADER,
 } from '@/lib/session/request-path';
+import { isSessionPath } from '@/lib/session/return-to';
 import { NextRequest, NextResponse } from 'next/server';
 
 function nextResponse(request: NextRequest): NextResponse {
@@ -30,7 +32,14 @@ export function proxy(request: NextRequest): NextResponse {
 	}
 
 	const { pathname } = request.nextUrl;
-	if (pathname === '/' || pathname === '/login') {
+	// /login/erro é pública: a pessoa sem acesso precisa ver a mensagem.
+	if (pathname === '/' || pathname === '/login' || pathname === HUB_ERROR_PATH) {
+		return nextResponse(request);
+	}
+
+	// Só as rotas do dashboard exigem sessão; um caminho inexistente segue
+	// para o 404 (app/not-found.tsx) em vez de abrir o login.
+	if (!isSessionPath(pathname)) {
 		return nextResponse(request);
 	}
 

@@ -336,7 +336,11 @@ test.describe('transparent refresh route handler', () => {
 		authRequests = [];
 	});
 
-	test('forces HUB logout when /me cannot validate the session', async ({
+	// /me indisponível (5xx/timeout) NÃO é sessão inválida: mostra o erro com
+	// "Tentar de novo" para a mesma página e NÃO desloga (o logout derrubaria
+	// também a sessão do HUB LHG). Sessão inválida de verdade (401/403) segue
+	// pelo refresh ou pelo logout, como nos outros testes.
+	test('shows the unavailable screen (no HUB logout) when /me cannot validate the session', async ({
 		page,
 	}, testInfo) => {
 		scenario = 'session-unavailable';
@@ -351,15 +355,23 @@ test.describe('transparent refresh route handler', () => {
 		const hubLogoutMethods = await interceptHubLogout(page);
 
 		await page.goto(ORIGINAL_DASHBOARD);
-		await expect(page).toHaveURL(/\/hub\/logout$/);
-		expect(hubLogoutMethods).toEqual(['POST']);
+		await expect(page).toHaveURL(/\/login\/erro\?codigo=indisponivel&returnTo=/);
 		await expect(
-			page.getByText('Sessão temporariamente indisponível'),
-		).toHaveCount(0);
+			page.getByText('Serviço temporariamente indisponível'),
+		).toBeVisible();
+		await expect(
+			page.getByRole('link', { name: 'Tentar de novo' }),
+		).toHaveAttribute('href', ORIGINAL_DASHBOARD);
+		await expect(page.getByText(SENSITIVE_UPSTREAM_VALUE)).toHaveCount(0);
+		expect(hubLogoutMethods).toEqual([]);
 
 		const cookies = await page.context().cookies();
-		expect(cookies.find((cookie) => cookie.name === 'access_token')).toBeUndefined();
-		expect(cookies.find((cookie) => cookie.name === 'refresh_token')).toBeUndefined();
+		expect(
+			cookies.find((cookie) => cookie.name === 'access_token')?.value,
+		).toBe('unavailable-token');
+		expect(
+			cookies.find((cookie) => cookie.name === 'refresh_token')?.value,
+		).toBe('unavailable-refresh');
 	});
 
 	test('forces HUB logout when the authenticated dashboard receives a KPI 401', async ({

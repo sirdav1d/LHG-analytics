@@ -22,8 +22,11 @@ function getContracts() {
 	const authUrl = require('../src/lib/auth-url') as typeof import('../src/lib/auth-url');
 	// eslint-disable-next-line @typescript-eslint/no-require-imports
 	const loginRedirect = require('../src/lib/session/login-redirect') as typeof import('../src/lib/session/login-redirect');
+	// eslint-disable-next-line @typescript-eslint/no-require-imports
+	const hubError = require('../src/lib/session/hub-error') as typeof import('../src/lib/session/hub-error');
 
 	return {
+		...hubError,
 		...cookies,
 		...requestPath,
 		...returnTo,
@@ -297,25 +300,36 @@ test.describe('session routing contracts', () => {
 				NEXT_PUBLIC_AUTH_URL: undefined,
 			},
 			() => {
-				// 1: any hub_error, even empty, wins over a valid session
-				for (const hubError of [
-					'access_denied',
-					'inactive',
-					'falha',
-					'',
-					'<script>alert(1)</script>',
+				// 1: any hub_error, even empty, wins over a valid session and goes to
+				// the error screen by CODE (unknown → falha); never back to the HUB login
+				for (const [hubError, code] of [
+					['access_denied', 'access_denied'],
+					['inactive', 'inactive'],
+					['indisponivel', 'indisponivel'],
+					['falha', 'falha'],
+					['', 'falha'],
+					['<script>alert(1)</script>', 'falha'],
+					['toString', 'falha'],
 				]) {
 					expect(resolveLoginRedirect({ ...base, hubError, session: admin })).toBe(
-						portal,
+						`/login/erro?codigo=${code}`,
 					);
 					expect(resolveLoginRedirect({ ...base, hubError, session: missing })).toBe(
-						portal,
+						`/login/erro?codigo=${code}`,
 					);
 				}
-				// 2: /me unavailable or forbidden
+				expect(
+					resolveLoginRedirect({
+						...base,
+						hubError: 'falha',
+						returnTo: '/general?menu=general&set=hoje',
+						session: missing,
+					}),
+				).toBe('/login/erro?codigo=falha&returnTo=%2Fgeneral%3Fmenu%3Dgeneral%26set%3Dhoje');
+				// 2: /me unavailable shows "indisponível" (no logout); forbidden logs out
 				expect(
 					resolveLoginRedirect({ ...base, session: { status: 'unavailable' } }),
-				).toBe('/api/session/logout');
+				).toBe('/login/erro?codigo=indisponivel');
 				expect(
 					resolveLoginRedirect({
 						...base,
@@ -326,6 +340,17 @@ test.describe('session routing contracts', () => {
 				expect(
 					resolveLoginRedirect({ ...base, set: 'ultimos_30_dias', session: admin }),
 				).toBe('/general?menu=general&set=ultimo_mes_fechado');
+				// 3b: authenticated with a safe returnTo goes there; unsafe → default
+				expect(
+					resolveLoginRedirect({
+						...base,
+						returnTo: '/reservations/lushipiranga?menu=reservations&set=hoje',
+						session: admin,
+					}),
+				).toBe('/reservations/lushipiranga?menu=reservations&set=hoje');
+				expect(
+					resolveLoginRedirect({ ...base, returnTo: '//evil.test', session: admin }),
+				).toBe('/general?menu=general&set=ultimos_7_dias');
 				// 4: authenticated without profile or unit
 				expect(resolveLoginRedirect({ ...base, session: noProfile })).toBe(portal);
 				// 5: no session or refused refresh goes to the HUB login
@@ -350,6 +375,69 @@ test.describe('session routing contracts', () => {
 			{ BACKEND_AUTH_ENDPOINT: undefined, NEXT_PUBLIC_AUTH_URL: undefined },
 			() => {
 				expect(resolveLoginRedirect({ ...base, session: missing })).toBe(portal);
+			},
+		);
+	});
+
+	test('hub error screen: fixed messages per code, retry only for transient errors', () => {
+		const { normalizeHubErrorCode, getHubErrorContent, buildHubErrorPath } =
+			getContracts();
+
+		expect(normalizeHubErrorCode('access_denied')).toBe('access_denied');
+		expect(normalizeHubErrorCode('__proto__')).toBe('falha');
+		expect(normalizeHubErrorCode(null)).toBe('falha');
+		expect(getHubErrorContent('access_denied').canRetry).toBe(false);
+		expect(getHubErrorContent('inactive').canRetry).toBe(false);
+		expect(getHubErrorContent('indisponivel').canRetry).toBe(true);
+		expect(getHubErrorContent('falha').canRetry).toBe(true);
+		expect(getHubErrorContent('access_denied').message).toContain(
+			'não tem acesso ao LHG Analytics',
+		);
+		expect(buildHubErrorPath('indisponivel', '/settings')).toBe(
+			'/login/erro?codigo=indisponivel&returnTo=%2Fsettings',
+		);
+		// returnTo inseguro não entra na URL da tela de erro
+		expect(buildHubErrorPath('falha', 'https://evil.test')).toBe(
+			'/login/erro?codigo=falha',
+		);
+	});
+
+	test('only dashboard roots require a session (unknown paths reach the 404)', () => {
+		const { isSessionPath } = getContracts();
+
+		for (const path of [
+			'/general',
+			'/general/liv',
+			'/operational/tout',
+			'/reservations/lushlapa',
+			'/restaurant/altana',
+			'/settings',
+		]) {
+			expect(isSessionPath(path)).toBe(true);
+		}
+		for (const path of ['/relatorios', '/generalx', '/login/erro', '/', '/x/general']) {
+			expect(isSessionPath(path)).toBe(false);
+		}
+	});
+
+	test('HUB browser navigations use the PUBLIC auth URL (same host as Sair)', async () => {
+		const { resolveAuthApiUrl, resolveHubLoginUrl } = getContracts();
+
+		await withAuthEnv(
+			{
+				BACKEND_AUTH_ENDPOINT: 'http://interno.svc:3005/auth/api',
+				NEXT_PUBLIC_AUTH_URL: 'https://analytics-dev.lhgmoteis.com.br/auth',
+			},
+			() => {
+				// navegações do navegador: o endereço público
+				expect(resolveHubLoginUrl(null)).toBe(
+					'https://analytics-dev.lhgmoteis.com.br/auth/api/hub/login',
+				);
+				expect(resolveAuthApiUrl('hub/logout')).toBe(
+					'https://analytics-dev.lhgmoteis.com.br/auth/api/hub/logout',
+				);
+				// chamadas do servidor: podem usar o endereço interno
+				expect(resolveAuthApiUrl('me')).toBe('http://interno.svc:3005/auth/api/me');
 			},
 		);
 	});
